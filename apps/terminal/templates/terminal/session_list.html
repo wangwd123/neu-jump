@@ -5,8 +5,6 @@
 {% load common_tags %}
 {% block custom_head_css_js %}
     <link href="{% static 'css/plugins/datepicker/datepicker3.css' %}" rel="stylesheet">
-    <link href="{% static 'css/plugins/select2/select2.min.css' %}" rel="stylesheet">
-    <script src="{% static 'js/plugins/select2/select2.full.min.js' %}"></script>
 {% endblock %}
 
 {% block content_left_head %}
@@ -41,7 +39,7 @@
     </table>
 
     <div id="actions" class="hide">
-        {% if type == "online" %}
+        {% if type == "online" and request.user.can_admin_current_org %}
         <div class="input-group">
             <select class="form-control m-b" style="width: auto" id="slct_bulk_update">
                 <option value="terminate">{% trans 'Terminate selected' %}</option>
@@ -72,6 +70,7 @@
         <li><a class="search-item" data-value="asset">{% trans 'Asset' %}</a></li>
         <li><a class="search-item" data-value="system_user">{% trans 'System user' %}</a></li>
         <li><a class="search-item" data-value="remote_addr">{% trans 'Remote addr' %}</a></li>
+        <li><a class="search-item" data-value="protocol">{% trans 'Protocol' %}</a></li>
 {#        <li><a class="search-item" data-value="protocol">{% trans 'Protocol' %}</a></li>#}
     </ul>
 {% endblock %}
@@ -104,8 +103,8 @@ var dateFrom = "{{ date_from.timestamp }}";
 var dateTo = "{{ date_to.timestamp }}";
 
 function initTable() {
-    dateFrom = formatDateAsCN(dateFrom * 1000);
-    dateTo = formatDateAsCN(dateTo * 1000);
+    dateFrom = toSafeDateISOStr(dateFrom * 1000);
+    dateTo = toSafeDateISOStr(dateTo * 1000);
     sessionListUrl = setUrlParam(sessionListUrl, "date_from", dateFrom);
     sessionListUrl = setUrlParam(sessionListUrl, "date_to", dateTo);
     var options = {
@@ -121,7 +120,7 @@ function initTable() {
                 $(td).html(data);
             }},
             {targets: 9, createdCell: function (td, cellData) {
-                var data = formatDateAsCN(cellData);
+                var data = toSafeLocalDateStr(cellData);
                 $(td).html(data);
             }},
             {targets: 10, createdCell: function (td, cellData, rowData) {
@@ -133,22 +132,29 @@ function initTable() {
             }},
             {targets: 11, createdCell: function (td, cellData, rowData) {
                 var btnGroup = "";
-                var replayBtn = '<a disabled data-session="sessionID" class="btn btn-xs btn-warning btn-replay" >{% trans "Replay" %}</a>'
-                    {#var replayBtn = '<a disabled onclick="window.open("url", "height=600, width=800, top=400, left=400, toolbar=no, menubar=no, scrollbars=no, location=no, status=no)" class="btn btn-xs btn-warning btn-replay" >{% trans "Replay" %}</a>'#}
+                var replayBtn = '<a disabled data-session="sessionID" class="btn btn-xs btn-warning btn-replay" >{% trans "Replay" %}</a>';
                 replayBtn = replayBtn.replace("sessionID", rowData.id);
+                var downloadBtn = ' <a disabled data-session="sessionID" class="btn btn-xs btn-info btn-download" >{% trans "Download" %}</a>';
+                downloadBtn = downloadBtn.replace("sessionID", rowData.id);
                 if (rowData.can_replay) {
-                    replayBtn = replayBtn.replace("disabled", "")
+                    replayBtn = replayBtn.replace("disabled", "");
+                    downloadBtn = downloadBtn.replace("disabled", "");
                 }
                 var termBtn = '<a class="btn btn-xs btn-danger btn-term" disabled value="sessionID" terminal="terminalID" >{% trans "Terminate" %}</a>';
-                if (rowData.protocol === "ssh" && "{{ request.user.is_org_admin }}" === "True") {
+                if ("{{ request.user.can_admin_current_org }}" === "True") {
                     termBtn = termBtn.replace("disabled", "")
                         .replace("sessionID", cellData)
                         .replace("terminalID", rowData.terminal)
                 }
+                var joinBtn = ' <a disabled data-session="sessionID" class="btn btn-xs btn-info btn-join" >{% trans "Monitoring" %}</a>';
+                joinBtn = joinBtn.replace("sessionID", rowData.id);
+                if (rowData.can_join){
+                    joinBtn = joinBtn.replace("disabled", "")
+                }
                 if (rowData.is_finished) {
-                    btnGroup += replayBtn
+                    btnGroup += replayBtn + downloadBtn
                 } else {
-                    btnGroup += termBtn;
+                    btnGroup += termBtn + joinBtn;
                 }
                 $(td).html(btnGroup);
             }},
@@ -194,14 +200,14 @@ $(document).ready(function() {
             forceParse: false,
             calendarWeeks: true,
             autoclose: true,
-            language: navigator.language || "en",
+            language: getUserLang(),
         };
         dateFromRef.datepicker(options).on("changeDate", function () {
             if (!$(this).val()) {
                 return
             }
             var value = $(this).val() + ' 0:0:0';
-            var date = formatDateAsCN(value);
+            var date = toSafeDateISOStr(value);
             var url = table.ajax.url();
             url = setUrlParam(url, "date_from", date);
             table.ajax.url(url);
@@ -212,7 +218,7 @@ $(document).ready(function() {
                 return
             }
             var value = $(this).val() + ' 23:59:59';
-            var date = formatDateAsCN(value);
+            var date = toSafeDateISOStr(value);
             var url = table.ajax.url();
             url = setUrlParam(url, "date_to", date);
             table.ajax.url(url);
@@ -230,7 +236,25 @@ $(document).ready(function() {
 }).on('click', '.btn-replay', function () {
     var sessionID = $(this).data("session");
     var replayUrl = "/luna/replay/" + sessionID;
-    window.open(replayUrl, "height=600, width=800, top=400, left=400, toolbar=no, menubar=no, scrollbars=no, location=no, status=no");
+    window.open(replayUrl, "_blank", "height=600, width=800, top=400, left=400, toolbar=no, menubar=no, scrollbars=no, location=no, status=no");
+})
+.on('click', '.btn-download', function () {
+    var sessionID = $(this).data("session");
+    var downloadUrl = "{% url 'terminal:session-replay-download' pk=DEFAULT_PK %}"
+        .replace("{{ DEFAULT_PK }}", sessionID);
+    var hasConfirm = getCookie('replayConfirm');
+    if (!hasConfirm) {
+        var help_text = "{% trans "Visit doc for replay play offline: " %}";
+        help_text += "https://github.com/jumpserver/videoplayer";
+        var r = confirm(help_text);
+        setCookie("replayConfirm", "1")
+    }
+    window.open(downloadUrl)
+})
+.on('click', '.btn-join', function () {
+    var sessionID = $(this).data("session");
+    var joinUrl = "/luna/join/?shareroom=" + sessionID;
+    window.open(joinUrl)
 })
 .on("click", '#session_table_filter input', function (e) {
     e.preventDefault();

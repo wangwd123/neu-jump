@@ -1,15 +1,9 @@
 # -*- coding: utf-8 -*-
 #
-
-from django.utils import timezone
 from django.db.models import Q
-from rest_framework.views import Response
-from django.shortcuts import get_object_or_404
-from rest_framework.generics import RetrieveUpdateAPIView, ListAPIView
-from rest_framework import viewsets
-from rest_framework.pagination import LimitOffsetPagination
 
 from common.permissions import IsOrgAdmin
+from orgs.mixins.api import OrgModelViewSet
 from common.utils import get_object_or_none
 from ..models import AssetPermission
 from ..hands import (
@@ -19,47 +13,41 @@ from .. import serializers
 
 
 __all__ = [
-    'AssetPermissionViewSet', 'AssetPermissionRemoveUserApi',
-    'AssetPermissionAddUserApi', 'AssetPermissionRemoveAssetApi',
-    'AssetPermissionAddAssetApi', 'AssetPermissionAssetsApi',
+    'AssetPermissionViewSet',
 ]
 
 
-class AssetPermissionViewSet(viewsets.ModelViewSet):
+class AssetPermissionViewSet(OrgModelViewSet):
     """
     资产授权列表的增删改查api
     """
-    queryset = AssetPermission.objects.all()
-    serializer_class = serializers.AssetPermissionCreateUpdateSerializer
-    pagination_class = LimitOffsetPagination
+    model = AssetPermission
+    serializer_classes = {
+        'default': serializers.AssetPermissionCreateUpdateSerializer,
+        'display': serializers.AssetPermissionListSerializer
+    }
     filter_fields = ['name']
     permission_classes = (IsOrgAdmin,)
 
-    def get_serializer_class(self):
-        if self.action in ("list", 'retrieve') and \
-                self.request.query_params.get("display"):
-            return serializers.AssetPermissionListSerializer
-        return self.serializer_class
+    def get_queryset(self):
+        queryset = super().get_queryset().prefetch_related(
+            "nodes", "assets", "users", "user_groups", "system_users"
+        )
+        return queryset
+
+    def is_query_all(self):
+        query_all = self.request.query_params.get('all', '1') == '1'
+        return query_all
 
     def filter_valid(self, queryset):
-        valid = self.request.query_params.get('is_valid', None)
-        if valid is None:
+        valid_query = self.request.query_params.get('is_valid', None)
+        if valid_query is None:
             return queryset
-        if valid in ['0', 'N', 'false', 'False']:
-            valid = False
+        invalid = valid_query in ['0', 'N', 'false', 'False']
+        if invalid:
+            queryset = queryset.invalid()
         else:
-            valid = True
-        now = timezone.now()
-        if valid:
-            queryset = queryset.filter(is_active=True).filter(
-                date_start__lt=now, date_expired__gt=now,
-            )
-        else:
-            queryset = queryset.filter(
-                Q(is_active=False) |
-                Q(date_start__gt=now) |
-                Q(date_expired__lt=now)
-            )
+            queryset = queryset.valid()
         return queryset
 
     def filter_system_user(self, queryset):
@@ -80,14 +68,20 @@ class AssetPermissionViewSet(viewsets.ModelViewSet):
         node_id = self.request.query_params.get('node_id')
         node_name = self.request.query_params.get('node')
         if node_id:
-            node = get_object_or_none(Node, pk=node_id)
+            _nodes = Node.objects.filter(pk=node_id)
         elif node_name:
-            node = get_object_or_none(Node, name=node_name)
+            _nodes = Node.objects.filter(value=node_name)
         else:
             return queryset
-        if not node:
+        if not _nodes:
             return queryset.none()
-        nodes = node.get_ancestor(with_self=True)
+
+        if not self.is_query_all():
+            queryset = queryset.filter(nodes__in=_nodes)
+            return queryset
+        nodes = set(_nodes)
+        for node in _nodes:
+            nodes |= set(node.get_ancestors(with_self=True))
         queryset = queryset.filter(nodes__in=nodes)
         return queryset
 
@@ -105,11 +99,20 @@ class AssetPermissionViewSet(viewsets.ModelViewSet):
             return queryset
         if not assets:
             return queryset.none()
-        inherit_nodes = set()
-        for asset in assets:
-            for node in asset.nodes.all():
-                inherit_nodes.update(set(node.get_ancestor(with_self=True)))
-        queryset = queryset.filter(Q(assets__in=assets) | Q(nodes__in=inherit_nodes))
+        if not self.is_query_all():
+            queryset = queryset.filter(assets__in=assets)
+            return queryset
+        inherit_all_nodes = set()
+        inherit_nodes_keys = assets.all().values_list('nodes__key', flat=True)
+
+        for key in inherit_nodes_keys:
+            if key is None:
+                continue
+            ancestor_keys = Node.get_node_ancestor_keys(key, with_self=True)
+            inherit_all_nodes.update(ancestor_keys)
+        queryset = queryset.filter(
+            Q(assets__in=assets) | Q(nodes__key__in=inherit_all_nodes)
+        ).distinct()
         return queryset
 
     def filter_user(self, queryset):
@@ -123,6 +126,14 @@ class AssetPermissionViewSet(viewsets.ModelViewSet):
             return queryset
         if not user:
             return queryset.none()
+        if not self.is_query_all():
+            queryset = queryset.filter(users=user)
+            return queryset
+        groups = user.groups.all()
+        queryset = queryset.filter(
+            Q(users=user) | Q(user_groups__in=groups)
+        ).distinct()
+        return queryset
 
     def filter_user_group(self, queryset):
         user_group_id = self.request.query_params.get('user_group_id')
@@ -148,107 +159,11 @@ class AssetPermissionViewSet(viewsets.ModelViewSet):
     def filter_queryset(self, queryset):
         queryset = super().filter_queryset(queryset)
         queryset = self.filter_valid(queryset)
+        queryset = self.filter_user(queryset)
         queryset = self.filter_keyword(queryset)
         queryset = self.filter_asset(queryset)
         queryset = self.filter_node(queryset)
         queryset = self.filter_system_user(queryset)
         queryset = self.filter_user_group(queryset)
+        queryset = queryset.distinct()
         return queryset
-
-    def get_queryset(self):
-        return self.queryset.all().prefetch_related(
-            "nodes", "assets", "users", "user_groups", "system_users"
-        )
-
-
-class AssetPermissionRemoveUserApi(RetrieveUpdateAPIView):
-    """
-    将用户从授权中移除，Detail页面会调用
-    """
-    permission_classes = (IsOrgAdmin,)
-    serializer_class = serializers.AssetPermissionUpdateUserSerializer
-    queryset = AssetPermission.objects.all()
-
-    def update(self, request, *args, **kwargs):
-        perm = self.get_object()
-        serializer = self.serializer_class(data=request.data)
-        if serializer.is_valid():
-            users = serializer.validated_data.get('users')
-            if users:
-                perm.users.remove(*tuple(users))
-            return Response({"msg": "ok"})
-        else:
-            return Response({"error": serializer.errors})
-
-
-class AssetPermissionAddUserApi(RetrieveUpdateAPIView):
-    permission_classes = (IsOrgAdmin,)
-    serializer_class = serializers.AssetPermissionUpdateUserSerializer
-    queryset = AssetPermission.objects.all()
-
-    def update(self, request, *args, **kwargs):
-        perm = self.get_object()
-        serializer = self.serializer_class(data=request.data)
-        if serializer.is_valid():
-            users = serializer.validated_data.get('users')
-            if users:
-                perm.users.add(*tuple(users))
-            return Response({"msg": "ok"})
-        else:
-            return Response({"error": serializer.errors})
-
-
-class AssetPermissionRemoveAssetApi(RetrieveUpdateAPIView):
-    """
-    将用户从授权中移除，Detail页面会调用
-    """
-    permission_classes = (IsOrgAdmin,)
-    serializer_class = serializers.AssetPermissionUpdateAssetSerializer
-    queryset = AssetPermission.objects.all()
-
-    def update(self, request, *args, **kwargs):
-        perm = self.get_object()
-        serializer = self.serializer_class(data=request.data)
-        if serializer.is_valid():
-            assets = serializer.validated_data.get('assets')
-            if assets:
-                perm.assets.remove(*tuple(assets))
-            return Response({"msg": "ok"})
-        else:
-            return Response({"error": serializer.errors})
-
-
-class AssetPermissionAddAssetApi(RetrieveUpdateAPIView):
-    permission_classes = (IsOrgAdmin,)
-    serializer_class = serializers.AssetPermissionUpdateAssetSerializer
-    queryset = AssetPermission.objects.all()
-
-    def update(self, request, *args, **kwargs):
-        perm = self.get_object()
-        serializer = self.serializer_class(data=request.data)
-        if serializer.is_valid():
-            assets = serializer.validated_data.get('assets')
-            if assets:
-                perm.assets.add(*tuple(assets))
-            return Response({"msg": "ok"})
-        else:
-            return Response({"error": serializer.errors})
-
-
-class AssetPermissionAssetsApi(ListAPIView):
-    permission_classes = (IsOrgAdmin,)
-    pagination_class = LimitOffsetPagination
-    serializer_class = serializers.AssetPermissionAssetsSerializer
-    filter_fields = ("hostname", "ip")
-    search_fields = filter_fields
-
-    def get_object(self):
-        pk = self.kwargs.get('pk')
-        return get_object_or_404(AssetPermission, pk=pk)
-
-    def get_queryset(self):
-        perm = self.get_object()
-        assets = perm.get_all_assets().only(
-            *self.serializer_class.Meta.only_fields
-        )
-        return assets

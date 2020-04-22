@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
 #
 
+from django.core.exceptions import ObjectDoesNotExist
 from rest_framework.utils import html
 from rest_framework.settings import api_settings
 from rest_framework.exceptions import ValidationError
-from rest_framework.fields import SkipField
+from rest_framework.fields import SkipField, empty
 
 __all__ = ['BulkSerializerMixin', 'BulkListSerializerMixin']
 
@@ -35,6 +36,18 @@ class BulkSerializerMixin(object):
                 ret[id_attr] = id_value
         return ret
 
+    def run_validation(self, data=empty):
+        """
+        批量创建时，获取到的self.initial_data是list，
+        所以想用一个属性来存放当前操作的数据集，在validate_field中使用
+        :param data:
+        :return:
+        """
+        # 只有批量创建的时候，才需要重写 initial_data
+        if self.parent:
+            self.initial_data = data
+        return super().run_validation(data)
+
 
 class BulkListSerializerMixin(object):
     """
@@ -48,6 +61,9 @@ class BulkListSerializerMixin(object):
         """
         List of dicts of native values <- List of dicts of primitive datatypes.
         """
+        if not self.instance:
+            return super().to_internal_value(data)
+
         if html.is_html_input(data):
             data = html.parse_html_list(data)
 
@@ -74,16 +90,21 @@ class BulkListSerializerMixin(object):
         for item in data:
             try:
                 # prepare child serializer to only handle one instance
-                if 'id' in item.keys():
-                    self.child.instance = self.instance.get(id=item['id']) if self.instance else None
-                if 'pk' in item.keys():
-                    self.child.instance = self.instance.get(id=item['pk']) if self.instance else None
-
+                if 'id' in item:
+                    pk = item["id"]
+                elif 'pk' in item:
+                    pk = item["pk"]
+                else:
+                    raise ValidationError("id or pk not in data")
+                child = self.instance.get(id=pk) if self.instance else None
+                self.child.instance = child
                 self.child.initial_data = item
                 # raw
                 validated = self.child.run_validation(item)
             except ValidationError as exc:
                 errors.append(exc.detail)
+            except ObjectDoesNotExist as e:
+                errors.append(e)
             else:
                 ret.append(validated)
                 errors.append({})

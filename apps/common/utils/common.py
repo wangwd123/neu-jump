@@ -8,11 +8,11 @@ import datetime
 import uuid
 from functools import wraps
 import time
-import copy
 import ipaddress
+import psutil
 
 
-UUID_PATTERN = re.compile(r'[0-9a-zA-Z\-]{36}')
+UUID_PATTERN = re.compile(r'\w{8}(-\w{4}){3}-\w{12}')
 ipip_db = None
 
 
@@ -27,8 +27,12 @@ def combine_seq(s1, s2, callback=None):
     return seq
 
 
-def get_logger(name=None):
+def get_logger(name=''):
     return logging.getLogger('jumpserver.%s' % name)
+
+
+def get_syslogger(name=''):
+    return logging.getLogger('syslog.%s' % name)
 
 
 def timesince(dt, since='', default="just now"):
@@ -106,7 +110,7 @@ def capacity_convert(size, expect='auto', rate=1000):
 
     if expect == 'auto':
         for unit, rate_ in rate_mapping.items():
-            if rate > std_size/rate_ > 1:
+            if rate > std_size/rate_ >= 1 or unit == "T":
                 expect = unit
                 break
 
@@ -150,6 +154,14 @@ def get_request_ip(request):
     return login_ip
 
 
+def get_request_ip_or_data(request):
+    ip = ''
+    if hasattr(request, 'data'):
+        ip = request.data.get('remote_addr', '')
+    ip = ip or get_request_ip(request)
+    return ip
+
+
 def validate_ip(ip):
     try:
         ipaddress.ip_address(ip)
@@ -187,11 +199,50 @@ logger = get_logger(__name__)
 
 def timeit(func):
     def wrapper(*args, **kwargs):
-        logger.debug("Start call: {}".format(func.__name__))
+        if hasattr(func, '__name__'):
+            name = func.__name__
+        else:
+            name = func
+        logger.debug("Start call: {}".format(name))
         now = time.time()
         result = func(*args, **kwargs)
         using = (time.time() - now) * 1000
-        msg = "Call {} end, using: {:.1f}ms".format(func.__name__, using)
+        msg = "End call {}, using: {:.1f}ms".format(name, using)
         logger.debug(msg)
         return result
     return wrapper
+
+
+def group_obj_by_count(objs, count=50):
+    objs_grouped = [
+        objs[i:i + count] for i in range(0, len(objs), count)
+    ]
+    return objs_grouped
+
+
+def dict_get_any(d, keys):
+    for key in keys:
+        value = d.get(key)
+        if value:
+            return value
+    return None
+
+
+class lazyproperty:
+    def __init__(self, func):
+        self.func = func
+
+    def __get__(self, instance, cls):
+        if instance is None:
+            return self
+        else:
+            value = self.func(instance)
+            setattr(instance, self.func.__name__, value)
+            return value
+
+
+def get_disk_usage():
+    partitions = psutil.disk_partitions()
+    mount_points = [p.mountpoint for p in partitions]
+    usages = {p: psutil.disk_usage(p) for p in mount_points}
+    return usages

@@ -6,7 +6,7 @@ from rest_framework import serializers
 from common.serializers import AdaptedBulkListSerializer
 
 from ..models import Node, AdminUser
-from orgs.mixins import BulkOrgResourceModelSerializer
+from orgs.mixins.serializers import BulkOrgResourceModelSerializer
 
 from .base import AuthSerializer, AuthSerializerMixin
 
@@ -45,7 +45,7 @@ class ReplaceNodeAdminUserSerializer(serializers.ModelSerializer):
     管理用户更新关联到的集群
     """
     nodes = serializers.PrimaryKeyRelatedField(
-        many=True, queryset=Node.objects.all()
+        many=True, queryset=Node.objects
     )
 
     class Meta:
@@ -54,4 +54,12 @@ class ReplaceNodeAdminUserSerializer(serializers.ModelSerializer):
 
 
 class TaskIDSerializer(serializers.Serializer):
+    task = serializers.CharField(read_only=True)
+
+
+class AssetUserTaskSerializer(serializers.Serializer):
+    ACTION_CHOICES = (
+        ('test', 'test'),
+    )
+    action = serializers.ChoiceField(choices=ACTION_CHOICES, write_only=True)
     task = serializers.CharField(read_only=True)

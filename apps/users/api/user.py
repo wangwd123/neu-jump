@@ -1,45 +1,42 @@
 # ~*~ coding: utf-8 ~*~
-import uuid
-
 from django.core.cache import cache
-from django.contrib.auth import logout
 from django.utils.translation import ugettext as _
 
-from rest_framework import status
 from rest_framework import generics
 from rest_framework.response import Response
-from rest_framework.permissions import IsAuthenticated
 from rest_framework_bulk import BulkModelViewSet
-from rest_framework.pagination import LimitOffsetPagination
 
 from common.permissions import (
-    IsOrgAdmin, IsCurrentUserOrReadOnly, IsOrgAdminOrAppUser,
-    CanUpdateDeleteSuperUser,
+    IsOrgAdmin, IsOrgAdminOrAppUser,
+    CanUpdateDeleteUser, IsSuperUser
 )
-from common.mixins import IDInCacheFilterMixin
+from common.mixins import CommonApiMixin
 from common.utils import get_logger
 from orgs.utils import current_org
-from ..serializers import UserSerializer, UserPKUpdateSerializer, \
-    UserUpdateGroupSerializer, ChangeUserPasswordSerializer
+from .. import serializers
+from .mixins import UserQuerysetMixin
 from ..models import User
 from ..signals import post_user_create
 
 
 logger = get_logger(__name__)
 __all__ = [
-    'UserViewSet', 'UserChangePasswordApi', 'UserUpdateGroupApi',
-    'UserResetPasswordApi', 'UserResetPKApi', 'UserUpdatePKApi',
-    'UserUnblockPKApi', 'UserProfileApi', 'UserResetOTPApi',
+    'UserViewSet', 'UserChangePasswordApi',
+    'UserUnblockPKApi', 'UserResetOTPApi',
 ]
 
 
-class UserViewSet(IDInCacheFilterMixin, BulkModelViewSet):
+class UserViewSet(CommonApiMixin, UserQuerysetMixin, BulkModelViewSet):
     filter_fields = ('username', 'email', 'name', 'id')
     search_fields = filter_fields
-    queryset = User.objects.exclude(role=User.ROLE_APP)
-    serializer_class = UserSerializer
-    permission_classes = (IsOrgAdmin, CanUpdateDeleteSuperUser)
-    pagination_class = LimitOffsetPagination
+    serializer_classes = {
+        'default': serializers.UserSerializer,
+        'display': serializers.UserDisplaySerializer
+    }
+    permission_classes = (IsOrgAdmin, CanUpdateDeleteUser)
+
+    def get_queryset(self):
+        return super().get_queryset().prefetch_related('groups')
 
     def send_created_signal(self, users):
         if not isinstance(users, list):
@@ -55,54 +52,38 @@ class UserViewSet(IDInCacheFilterMixin, BulkModelViewSet):
             current_org.users.add(*users)
         self.send_created_signal(users)
 
-    def get_queryset(self):
-        queryset = current_org.get_org_users().prefetch_related('groups')
-        return queryset
-
     def get_permissions(self):
-        if self.action == "retrieve":
+        if self.action in ["retrieve", "list"]:
             self.permission_classes = (IsOrgAdminOrAppUser,)
+        if self.request.query_params.get('all'):
+            self.permission_classes = (IsSuperUser,)
         return super().get_permissions()
 
-    def _deny_permission(self, instance):
-        """
-        check current user has permission to handle instance
-        (update, destroy, bulk_update, bulk destroy)
-        """
-        if not self.request.user.is_superuser and instance.is_superuser:
-            return True
-        if self.request.user == instance:
-            return True
-        return False
-
-    def _bulk_deny_permission(self, instances):
-        deny_instances = [i for i in instances if self._deny_permission(i)]
-        if len(deny_instances) > 0:
-            return True
+    def perform_destroy(self, instance):
+        if current_org.is_real():
+            instance.remove()
         else:
-            return False
+            return super().perform_destroy(instance)
 
-    def allow_bulk_destroy(self, qs, filtered):
-        if self._bulk_deny_permission(filtered):
-            return False
-        return qs.count() != filtered.count()
+    def perform_bulk_destroy(self, objects):
+        for obj in objects:
+            self.check_object_permissions(self.request, obj)
+            self.perform_destroy(obj)
 
-    def bulk_update(self, request, *args, **kwargs):
-        """
-        rewrite because limit org_admin update superuser
-        """
-        # restrict the update to the filtered queryset
-        queryset = self.filter_queryset(self.get_queryset())
-        if self._bulk_deny_permission(queryset):
-            data = {'msg': _("You do not have permission.")}
-            return Response(data=data, status=status.HTTP_403_FORBIDDEN)
-        return super().bulk_update(request, *args, **kwargs)
+    def perform_bulk_update(self, serializer):
+        # TODO: 需要测试
+        users_ids = [
+            d.get("id") or d.get("pk") for d in serializer.validated_data
+        ]
+        users = current_org.get_org_members().filter(id__in=users_ids)
+        for user in users:
+            self.check_object_permissions(self.request, user)
+        return super().perform_bulk_update(serializer)
 
 
-class UserChangePasswordApi(generics.RetrieveUpdateAPIView):
+class UserChangePasswordApi(UserQuerysetMixin, generics.RetrieveUpdateAPIView):
     permission_classes = (IsOrgAdmin,)
-    queryset = User.objects.all()
-    serializer_class = ChangeUserPasswordSerializer
+    serializer_class = serializers.ChangeUserPasswordSerializer
 
     def perform_update(self, serializer):
         user = self.get_object()
@@ -110,56 +91,9 @@ class UserChangePasswordApi(generics.RetrieveUpdateAPIView):
         user.save()
 
 
-class UserUpdateGroupApi(generics.RetrieveUpdateAPIView):
-    queryset = User.objects.all()
-    serializer_class = UserUpdateGroupSerializer
+class UserUnblockPKApi(UserQuerysetMixin, generics.UpdateAPIView):
     permission_classes = (IsOrgAdmin,)
-
-
-class UserResetPasswordApi(generics.UpdateAPIView):
-    queryset = User.objects.all()
-    serializer_class = UserSerializer
-    permission_classes = (IsAuthenticated,)
-
-    def perform_update(self, serializer):
-        # Note: we are not updating the user object here.
-        # We just do the reset-password stuff.
-        from ..utils import send_reset_password_mail
-        user = self.get_object()
-        user.password_raw = str(uuid.uuid4())
-        user.save()
-        send_reset_password_mail(user)
-
-
-class UserResetPKApi(generics.UpdateAPIView):
-    queryset = User.objects.all()
-    serializer_class = UserSerializer
-    permission_classes = (IsAuthenticated,)
-
-    def perform_update(self, serializer):
-        from ..utils import send_reset_ssh_key_mail
-        user = self.get_object()
-        user.is_public_key_valid = False
-        user.save()
-        send_reset_ssh_key_mail(user)
-
-
-# 废弃
-class UserUpdatePKApi(generics.UpdateAPIView):
-    queryset = User.objects.all()
-    serializer_class = UserPKUpdateSerializer
-    permission_classes = (IsCurrentUserOrReadOnly,)
-
-    def perform_update(self, serializer):
-        user = self.get_object()
-        user.public_key = serializer.validated_data['public_key']
-        user.save()
-
-
-class UserUnblockPKApi(generics.UpdateAPIView):
-    queryset = User.objects.all()
-    permission_classes = (IsOrgAdmin,)
-    serializer_class = UserSerializer
+    serializer_class = serializers.UserSerializer
     key_prefix_limit = "_LOGIN_LIMIT_{}_{}"
     key_prefix_block = "_LOGIN_BLOCK_{}"
 
@@ -172,25 +106,16 @@ class UserUnblockPKApi(generics.UpdateAPIView):
         cache.delete(key_block)
 
 
-class UserProfileApi(generics.RetrieveAPIView):
-    permission_classes = (IsAuthenticated,)
-    serializer_class = UserSerializer
-
-    def get_object(self):
-        return self.request.user
-
-
-class UserResetOTPApi(generics.RetrieveAPIView):
-    queryset = User.objects.all()
+class UserResetOTPApi(UserQuerysetMixin, generics.RetrieveAPIView):
     permission_classes = (IsOrgAdmin,)
+    serializer_class = serializers.ResetOTPSerializer
 
     def retrieve(self, request, *args, **kwargs):
         user = self.get_object() if kwargs.get('pk') else request.user
         if user == request.user:
             msg = _("Could not reset self otp, use profile reset instead")
             return Response({"error": msg}, status=401)
-        if user.otp_enabled and user.otp_secret_key:
-            user.otp_secret_key = ''
+        if user.mfa_enabled:
+            user.reset_mfa()
             user.save()
-            logout(request)
         return Response({"msg": "success"})

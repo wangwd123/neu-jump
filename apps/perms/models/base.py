@@ -4,11 +4,12 @@
 import uuid
 from django.utils.translation import ugettext_lazy as _
 from django.db import models
+from django.db.models import Q
 from django.utils import timezone
-from orgs.mixins import OrgModelMixin
+from orgs.mixins.models import OrgModelMixin
 
-from common.utils import date_expired_default, set_or_append_attr_bulk
-from orgs.mixins import OrgManager
+from common.utils import date_expired_default
+from orgs.mixins.models import OrgManager
 
 
 __all__ = [
@@ -23,6 +24,18 @@ class BasePermissionQuerySet(models.QuerySet):
     def valid(self):
         return self.active().filter(date_start__lt=timezone.now()) \
             .filter(date_expired__gt=timezone.now())
+
+    def inactive(self):
+        return self.filter(is_active=False)
+
+    def invalid(self):
+        now = timezone.now()
+        q = (
+            Q(is_active=False) |
+            Q(date_start__gt=now) |
+            Q(date_expired__lt=now)
+        )
+        return self.filter(q)
 
 
 class BasePermissionManager(OrgManager):
@@ -67,9 +80,10 @@ class BasePermission(OrgModelMixin):
         return False
 
     def get_all_users(self):
-        users = set(self.users.all())
-        for group in self.user_groups.all():
-            _users = group.users.all()
-            set_or_append_attr_bulk(_users, 'inherit', group.name)
-            users.update(set(_users))
+        from users.models import User
+        users_id = self.users.all().values_list('id', flat=True)
+        groups_id = self.user_groups.all().values_list('id', flat=True)
+        users = User.objects.filter(
+            Q(id__in=users_id) | Q(groups__id__in=groups_id)
+        ).distinct()
         return users

@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 #
 
+from django.conf import settings
 from .ansible.inventory import BaseInventory
 
 from common.utils import get_logger
@@ -14,6 +15,7 @@ logger = get_logger(__file__)
 
 
 class JMSBaseInventory(BaseInventory):
+    windows_ssh_default_shell = settings.WINDOWS_SSH_DEFAULT_SHELL
 
     def convert_to_ansible(self, asset, run_as_admin=False):
         info = {
@@ -30,12 +32,10 @@ class JMSBaseInventory(BaseInventory):
             info.update(asset.get_auth_info())
             if asset.is_unixlike():
                 info["become"] = asset.admin_user.become_info
-        for node in asset.nodes.all():
-            info["groups"].append(node.value)
         if asset.is_windows():
             info["vars"].update({
                 "ansible_connection": "ssh",
-                "ansible_shell_type": "cmd",
+                "ansible_shell_type": self.windows_ssh_default_shell,
             })
         for label in asset.labels.all():
             info["vars"].update({
@@ -45,14 +45,13 @@ class JMSBaseInventory(BaseInventory):
             info["vars"].update({
                 "domain": asset.domain.name,
             })
-            info["groups"].append("domain_"+asset.domain.name)
         return info
 
     @staticmethod
     def make_proxy_command(asset):
         gateway = asset.domain.random_gateway()
         proxy_command_list = [
-            "ssh", "-p", str(gateway.port),
+            "ssh", "-o", "Port={}".format(gateway.port),
             "-o", "StrictHostKeyChecking=no",
             "{}@{}".format(gateway.username, gateway.ip),
             "-W", "%h:%p", "-q",
@@ -73,8 +72,8 @@ class JMSBaseInventory(BaseInventory):
 
 class JMSInventory(JMSBaseInventory):
     """
-    JMS Inventory is the manager with jumpserver assets, so you can
-    write you own manager, construct you inventory,
+    JMS Inventory is the inventory with jumpserver assets, so you can
+    write you own inventory, construct you inventory,
     user_info  is obtained from admin_user or asset_user
     """
     def __init__(self, assets, run_as_admin=False, run_as=None, become_info=None):
@@ -93,7 +92,7 @@ class JMSInventory(JMSBaseInventory):
 
         for asset in assets:
             host = self.convert_to_ansible(asset, run_as_admin=run_as_admin)
-            if run_as:
+            if run_as is not None:
                 run_user_info = self.get_run_user_info(host)
                 host.update(run_user_info)
             if become_info and asset.is_unixlike():
@@ -105,13 +104,13 @@ class JMSInventory(JMSBaseInventory):
     def get_run_user_info(self, host):
         from assets.backends import AssetUserManager
 
-        if not self.run_as:
+        if self.run_as is None:
             return {}
 
         try:
             asset = self.assets.get(id=host.get('id'))
             manager = AssetUserManager()
-            run_user = manager.get(self.run_as, asset)
+            run_user = manager.get_latest(username=self.run_as, asset=asset)
         except Exception as e:
             logger.error(e, exc_info=True)
             return {}
@@ -121,7 +120,7 @@ class JMSInventory(JMSBaseInventory):
 
 class JMSCustomInventory(JMSBaseInventory):
     """
-    JMS Custom Inventory is the manager with jumpserver assets,
+    JMS Custom Inventory is the inventory with jumpserver assets,
     user_info  is obtained from custom parameter
     """
 

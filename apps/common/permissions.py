@@ -4,8 +4,6 @@ import time
 
 from rest_framework import permissions
 from django.contrib.auth.mixins import UserPassesTestMixin
-from django.shortcuts import redirect
-from django.http.response import HttpResponseForbidden
 from django.conf import settings
 
 from orgs.utils import current_org
@@ -27,12 +25,6 @@ class IsAppUser(IsValidUser):
             and request.user.is_app
 
 
-class IsAuditor(IsValidUser):
-    def has_permission(self, request, view):
-        return super(IsAuditor, self).has_permission(request, view) \
-               and request.user.is_auditor
-
-
 class IsSuperUser(IsValidUser):
     def has_permission(self, request, view):
         return super(IsSuperUser, self).has_permission(request, view) \
@@ -45,10 +37,26 @@ class IsSuperUserOrAppUser(IsSuperUser):
             or request.user.is_app
 
 
+class IsSuperAuditor(IsValidUser):
+    def has_permission(self, request, view):
+        return super(IsSuperAuditor, self).has_permission(request, view) \
+               and request.user.is_super_auditor
+
+
+class IsOrgAuditor(IsValidUser):
+    def has_permission(self, request, view):
+        if not current_org:
+            return False
+        return super(IsOrgAuditor, self).has_permission(request, view) \
+               and current_org.can_audit_by(request.user)
+
+
 class IsOrgAdmin(IsValidUser):
     """Allows access only to superuser"""
 
     def has_permission(self, request, view):
+        if not current_org:
+            return False
         return super(IsOrgAdmin, self).has_permission(request, view) \
             and current_org.can_admin_by(request.user)
 
@@ -57,6 +65,8 @@ class IsOrgAdminOrAppUser(IsValidUser):
     """Allows access between superuser and app user"""
 
     def has_permission(self, request, view):
+        if not current_org:
+            return False
         return super(IsOrgAdminOrAppUser, self).has_permission(request, view) \
             and (current_org.can_admin_by(request.user) or request.user.is_app)
 
@@ -75,43 +85,6 @@ class IsCurrentUserOrReadOnly(permissions.BasePermission):
         if request.method in permissions.SAFE_METHODS:
             return True
         return obj == request.user
-
-
-class LoginRequiredMixin(UserPassesTestMixin):
-    def test_func(self):
-        if self.request.user.is_authenticated:
-            return True
-        else:
-            return False
-
-
-class AdminUserRequiredMixin(UserPassesTestMixin):
-    def test_func(self):
-        if not self.request.user.is_authenticated:
-            return False
-        elif not current_org.can_admin_by(self.request.user):
-            self.raise_exception = True
-            return False
-        return True
-
-    def dispatch(self, request, *args, **kwargs):
-        if not request.user.is_authenticated:
-            return super().dispatch(request, *args, **kwargs)
-
-        if not current_org:
-            return redirect('orgs:switch-a-org')
-
-        if not current_org.can_admin_by(request.user):
-            if request.user.is_org_admin:
-                return redirect('orgs:switch-a-org')
-            return HttpResponseForbidden()
-        return super().dispatch(request, *args, **kwargs)
-
-
-class SuperUserRequiredMixin(UserPassesTestMixin):
-    def test_func(self):
-        if self.request.user.is_authenticated and self.request.user.is_superuser:
-            return True
 
 
 class WithBootstrapToken(permissions.BasePermission):
@@ -137,6 +110,16 @@ class PermissionsMixin(UserPassesTestMixin):
         return True
 
 
+class UserCanUpdatePassword:
+    def has_permission(self, request, view):
+        return request.user.can_update_password()
+
+
+class UserCanUpdateSSHKey:
+    def has_permission(self, request, view):
+        return request.user.can_update_ssh_key()
+
+
 class NeedMFAVerify(permissions.BasePermission):
     def has_permission(self, request, view):
         mfa_verify_time = request.session.get('MFA_VERIFY_TIME', 0)
@@ -145,14 +128,57 @@ class NeedMFAVerify(permissions.BasePermission):
         return False
 
 
-class CanUpdateDeleteSuperUser(permissions.BasePermission):
+class CanUpdateDeleteUser(permissions.BasePermission):
+
+    @staticmethod
+    def has_delete_object_permission(request, view, obj):
+        if request.user.is_anonymous:
+            return False
+        if not request.user.can_admin_current_org:
+            return False
+        # 超级管理员 / 组织管理员
+        if str(request.user.id) == str(obj.id):
+            return False
+        # 超级管理员
+        if request.user.is_superuser:
+            if obj.is_superuser and obj.username in ['admin']:
+                return False
+            return True
+        # 组织管理员
+        if obj.is_superuser:
+            return False
+        if obj.is_super_auditor:
+            return False
+        if obj.can_admin_current_org:
+            return False
+        return True
+
+    @staticmethod
+    def has_update_object_permission(request, view, obj):
+        if request.user.is_anonymous:
+            return False
+        if not request.user.can_admin_current_org:
+            return False
+        # 超级管理员 / 组织管理员
+        if str(request.user.id) == str(obj.id):
+            return True
+        # 超级管理员
+        if request.user.is_superuser:
+            return True
+        # 组织管理员
+        if obj.is_superuser:
+            return False
+        if obj.is_super_auditor:
+            return False
+        return True
+
     def has_object_permission(self, request, view, obj):
-        if request.method in ['GET', 'OPTIONS']:
-            return True
-        elif request.method == 'DELETE' and str(request.user.id) == str(obj.id):
+        if request.user.is_anonymous:
             return False
-        elif request.user.is_superuser:
-            return True
-        if hasattr(obj, 'is_superuser') and obj.is_superuser:
+        if not request.user.can_admin_current_org:
             return False
+        if request.method in ['DELETE']:
+            return self.has_delete_object_permission(request, view, obj)
+        if request.method in ['PUT', 'PATCH']:
+            return self.has_update_object_permission(request, view, obj)
         return True

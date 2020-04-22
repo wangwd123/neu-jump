@@ -28,9 +28,6 @@ class TerminalSerializer(serializers.ModelSerializer):
         valid = super().is_valid(raise_exception=raise_exception)
         if not valid:
             return valid
-        if not settings.SECURITY_SERVICE_ACCOUNT_REGISTRATION:
-            error = {"error": "service account registration disabled"}
-            raise serializers.ValidationError(error)
         data = {'name': self.validated_data.get('name')}
         kwargs = {'data': data}
         if self.instance and self.instance.user:
@@ -58,5 +55,5 @@ class TerminalSerializer(serializers.ModelSerializer):
 
 class TerminalRegistrationSerializer(serializers.Serializer):
     name = serializers.CharField(max_length=128)
-    comment = serializers.CharField(max_length=128)
+    comment = serializers.CharField(max_length=128, )
     service_account = ServiceAccountSerializer(read_only=True)

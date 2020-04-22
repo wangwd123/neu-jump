@@ -6,17 +6,18 @@ import uuid
 import logging
 import random
 from functools import reduce
-from collections import OrderedDict, defaultdict
-from django.core.cache import cache
+from collections import OrderedDict
 
 from django.db import models
 from django.utils.translation import ugettext_lazy as _
 
-from .user import AdminUser, SystemUser
+from common.fields.model import JsonDictTextField
+from common.utils import lazyproperty
+from orgs.mixins.models import OrgModelMixin, OrgManager
+from .base import ConnectivityMixin
 from .utils import Connectivity
-from orgs.mixins import OrgModelMixin, OrgManager
 
-__all__ = ['Asset', 'ProtocolsMixin']
+__all__ = ['Asset', 'ProtocolsMixin', 'Platform']
 logger = logging.getLogger(__name__)
 
 
@@ -33,10 +34,18 @@ def default_cluster():
 def default_node():
     try:
         from .node import Node
-        root = Node.root()
+        root = Node.org_root()
         return root
     except:
         return None
+
+
+class AssetManager(OrgManager):
+    # def get_queryset(self):
+    #     return super().get_queryset().annotate(
+    #         platform_base=models.F('platform__base')
+    #     )
+    pass
 
 
 class AssetQuerySet(models.QuerySet):
@@ -59,7 +68,7 @@ class ProtocolsMixin:
     PROTOCOL_CHOICES = (
         (PROTOCOL_SSH, 'ssh'),
         (PROTOCOL_RDP, 'rdp'),
-        (PROTOCOL_TELNET, 'telnet (beta)'),
+        (PROTOCOL_TELNET, 'telnet'),
         (PROTOCOL_VNC, 'vnc'),
     )
 
@@ -104,43 +113,62 @@ class NodesRelationMixin:
     id = ""
     _all_nodes_keys = None
 
-    @classmethod
-    def get_all_nodes_keys(cls):
-        """
-        :return: {asset.id: [node.key, ]}
-        """
-        from .node import Node
-        cache_key = cls.ALL_ASSET_NODES_CACHE_KEY
-        cached = cache.get(cache_key)
-        if cached:
-            return cached
-        assets = Asset.objects.all().only('id').prefetch_related(
-            models.Prefetch('nodes', queryset=Node.objects.all().only('key'))
-        )
-        assets_nodes_keys = {}
-        for asset in assets:
-            assets_nodes_keys[asset.id] = [n.key for n in asset.nodes.all()]
-        cache.set(cache_key, assets_nodes_keys, cls.CACHE_TIME)
-        return assets_nodes_keys
-
-    @classmethod
-    def expire_all_nodes_keys_cache(cls):
-        cache_key = cls.ALL_ASSET_NODES_CACHE_KEY
-        cache.delete(cache_key)
-
     def get_nodes(self):
         from .node import Node
-        nodes = self.nodes.all() or [Node.root()]
+        nodes = self.nodes.all()
+        if not nodes:
+            nodes = Node.objects.filter(id=Node.org_root().id)
         return nodes
 
     def get_all_nodes(self, flat=False):
         nodes = []
         for node in self.get_nodes():
-            _nodes = node.get_ancestor(with_self=True)
+            _nodes = node.get_ancestors(with_self=True)
             nodes.append(_nodes)
         if flat:
             nodes = list(reduce(lambda x, y: set(x) | set(y), nodes))
         return nodes
+
+
+class Platform(models.Model):
+    CHARSET_CHOICES = (
+        ('utf8', 'UTF-8'),
+        ('gbk', 'GBK'),
+    )
+    BASE_CHOICES = (
+        ('Linux', 'Linux'),
+        ('Unix', 'Unix'),
+        ('MacOS', 'MacOS'),
+        ('BSD', 'BSD'),
+        ('Windows', 'Windows'),
+        ('Other', 'Other'),
+    )
+    name = models.SlugField(verbose_name=_("Name"), unique=True, allow_unicode=True)
+    base = models.CharField(choices=BASE_CHOICES, max_length=16, default='Linux', verbose_name=_("Base"))
+    charset = models.CharField(default='utf8', choices=CHARSET_CHOICES, max_length=8, verbose_name=_("Charset"))
+    meta = JsonDictTextField(blank=True, null=True, verbose_name=_("Meta"))
+    internal = models.BooleanField(default=False, verbose_name=_("Internal"))
+    comment = models.TextField(blank=True, null=True, verbose_name=_("Comment"))
+
+    @classmethod
+    def default(cls):
+        linux, created = cls.objects.get_or_create(
+            defaults={'name': 'Linux'}, name='Linux'
+        )
+        return linux.id
+
+    def is_windows(self):
+        return self.base.lower() in ('windows',)
+
+    def is_unixlike(self):
+        return self.base.lower() in ("linux", "unix", "macos", "bsd")
+
+    def __str__(self):
+        return self.name
+
+    class Meta:
+        verbose_name = _("Platform")
+        # ordering = ('name',)
 
 
 class Asset(ProtocolsMixin, NodesRelationMixin, OrgModelMixin):
@@ -162,9 +190,8 @@ class Asset(ProtocolsMixin, NodesRelationMixin, OrgModelMixin):
                                 choices=ProtocolsMixin.PROTOCOL_CHOICES,
                                 verbose_name=_('Protocol'))
     port = models.IntegerField(default=22, verbose_name=_('Port'))
-
     protocols = models.CharField(max_length=128, default='ssh/22', blank=True, verbose_name=_("Protocols"))
-    platform = models.CharField(max_length=128, choices=PLATFORM_CHOICES, default='Linux', verbose_name=_('Platform'))
+    platform = models.ForeignKey(Platform, default=Platform.default, on_delete=models.PROTECT, verbose_name=_("Platform"), related_name='assets')
     domain = models.ForeignKey("assets.Domain", null=True, blank=True, related_name='assets', verbose_name=_("Domain"), on_delete=models.SET_NULL)
     nodes = models.ManyToManyField('assets.Node', default=default_node, related_name='assets', verbose_name=_("Nodes"))
     is_active = models.BooleanField(default=True, verbose_name=_('Is active'))
@@ -199,7 +226,7 @@ class Asset(ProtocolsMixin, NodesRelationMixin, OrgModelMixin):
     date_created = models.DateTimeField(auto_now_add=True, null=True, blank=True, verbose_name=_('Date created'))
     comment = models.TextField(max_length=128, default='', blank=True, verbose_name=_('Comment'))
 
-    objects = OrgManager.from_queryset(AssetQuerySet)()
+    objects = AssetManager.from_queryset(AssetQuerySet)()
     _connectivity = None
 
     def __str__(self):
@@ -214,20 +241,25 @@ class Asset(ProtocolsMixin, NodesRelationMixin, OrgModelMixin):
             return False, warning
         return True, warning
 
+    @lazyproperty
+    def platform_base(self):
+        return self.platform.base
+
+    @lazyproperty
+    def admin_user_username(self):
+        """求可连接性时，直接用用户名去取，避免再查一次admin user
+        serializer 中直接通过annotate方式返回了这个
+        """
+        return self.admin_user.username
+
     def is_windows(self):
-        if self.platform in ("Windows", "Windows2016"):
-            return True
-        else:
-            return False
+        return self.platform.is_windows()
 
     def is_unixlike(self):
-        if self.platform not in ("Windows", "Windows2016", "Other"):
-            return True
-        else:
-            return False
+        return self.platform.is_unixlike()
 
     def is_support_ansible(self):
-        return self.has_protocol('ssh') and self.platform not in ("Other",)
+        return self.has_protocol('ssh') and self.platform_base not in ("Other",)
 
     @property
     def cpu_info(self):
@@ -252,9 +284,11 @@ class Asset(ProtocolsMixin, NodesRelationMixin, OrgModelMixin):
     def connectivity(self):
         if self._connectivity:
             return self._connectivity
-        if not self.admin_user:
+        if not self.admin_user_username:
             return Connectivity.unknown()
-        connectivity = self.admin_user.get_asset_connectivity(self)
+        connectivity = ConnectivityMixin.get_asset_username_connectivity(
+            self, self.admin_user_username
+        )
         return connectivity
 
     @connectivity.setter
@@ -267,7 +301,7 @@ class Asset(ProtocolsMixin, NodesRelationMixin, OrgModelMixin):
         if not self.admin_user:
             return {}
 
-        self.admin_user.load_specific_asset_auth(self)
+        self.admin_user.load_asset_special_auth(self)
         info = {
             'username': self.admin_user.username,
             'password': self.admin_user.password,
@@ -288,9 +322,9 @@ class Asset(ProtocolsMixin, NodesRelationMixin, OrgModelMixin):
     def as_tree_node(self, parent_node):
         from common.tree import TreeNode
         icon_skin = 'file'
-        if self.platform.lower() == 'windows':
+        if self.platform_base.lower() == 'windows':
             icon_skin = 'windows'
-        elif self.platform.lower() == 'linux':
+        elif self.platform_base.lower() == 'linux':
             icon_skin = 'linux'
         data = {
             'id': str(self.id),
@@ -307,7 +341,7 @@ class Asset(ProtocolsMixin, NodesRelationMixin, OrgModelMixin):
                     'hostname': self.hostname,
                     'ip': self.ip,
                     'protocols': self.protocols_as_list,
-                    'platform': self.platform,
+                    'platform': self.platform_base,
                 }
             }
         }
@@ -320,6 +354,7 @@ class Asset(ProtocolsMixin, NodesRelationMixin, OrgModelMixin):
 
     @classmethod
     def generate_fake(cls, count=100):
+        from .user import AdminUser, SystemUser
         from random import seed, choice
         from django.db import IntegrityError
         from .node import Node
@@ -345,7 +380,6 @@ class Asset(ProtocolsMixin, NodesRelationMixin, OrgModelMixin):
                 else:
                     _nodes = [Node.default_node()]
                 asset.nodes.set(_nodes)
-                asset.system_users = [choice(SystemUser.objects.all()) for i in range(3)]
                 logger.debug('Generate fake asset : %s' % asset.ip)
             except IntegrityError:
                 print('Error continue')

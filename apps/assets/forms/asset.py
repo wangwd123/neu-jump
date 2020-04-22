@@ -1,17 +1,18 @@
 # -*- coding: utf-8 -*-
 #
+from itertools import groupby
 from django import forms
 from django.utils.translation import gettext_lazy as _
 
 from common.utils import get_logger
-from orgs.mixins import OrgModelForm
+from orgs.mixins.forms import OrgModelForm
 
-from ..models import Asset, Node
+from ..models import Asset, Platform
 
 
 logger = get_logger(__file__)
 __all__ = [
-    'AssetCreateForm', 'AssetUpdateForm', 'AssetBulkUpdateForm', 'ProtocolForm',
+    'AssetCreateUpdateForm', 'AssetBulkUpdateForm', 'ProtocolForm',
 ]
 
 
@@ -26,23 +27,60 @@ class ProtocolForm(forms.Form):
     )
 
 
-class AssetCreateForm(OrgModelForm):
+class AssetCreateUpdateForm(OrgModelForm):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self.set_platform_to_name()
+        self.set_fields_queryset()
+
+    def set_fields_queryset(self):
         nodes_field = self.fields['nodes']
-        nodes_field.choices = ((n.id, n.full_value) for n in
-                               Node.get_queryset())
+        nodes_choices = []
+        if self.instance:
+            nodes_choices = [
+                (n.id, n.full_value) for n in
+                self.instance.nodes.all()
+            ]
+        nodes_field.choices = nodes_choices
+
+    @staticmethod
+    def sorted_platform(platform):
+        if platform['base'] == 'Other':
+            return 'zz'
+        return platform['base']
+
+    def set_platform_to_name(self):
+        choices = []
+        platforms = Platform.objects.all().values('name', 'base')
+        platforms_sorted = sorted(platforms, key=self.sorted_platform)
+        platforms_grouped = groupby(platforms_sorted, key=lambda x: x['base'])
+        for i in platforms_grouped:
+            base = i[0]
+            grouped = sorted(i[1], key=lambda x: x['name'])
+            grouped = [(j['name'], j['name']) for j in grouped]
+            choices.append(
+                (base, grouped)
+            )
+        platform_field = self.fields['platform']
+        platform_field.choices = choices
+        if self.instance:
+            self.initial['platform'] = self.instance.platform.name
+
+    def add_nodes_initial(self, node):
+        nodes_field = self.fields['nodes']
+        nodes_field.choices.append((node.id, node.full_value))
+        nodes_field.initial = [node]
 
     class Meta:
         model = Asset
         fields = [
             'hostname', 'ip', 'public_ip', 'protocols', 'comment',
             'nodes', 'is_active', 'admin_user', 'labels', 'platform',
-            'domain',
+            'domain', 'number',
         ]
         widgets = {
             'nodes': forms.SelectMultiple(attrs={
-                'class': 'select2', 'data-placeholder': _('Nodes')
+                'class': 'nodes-select2', 'data-placeholder': _('Nodes')
             }),
             'admin_user': forms.Select(attrs={
                 'class': 'select2', 'data-placeholder': _('Admin user')
@@ -53,40 +91,8 @@ class AssetCreateForm(OrgModelForm):
             'domain': forms.Select(attrs={
                 'class': 'select2', 'data-placeholder': _('Domain')
             }),
-        }
-        labels = {
-            'nodes': _("Node"),
-        }
-        help_texts = {
-            'admin_user': _(
-                'root or other NOPASSWD sudo privilege user existed in asset,'
-                'If asset is windows or other set any one, more see admin user left menu'
-            ),
-            'platform': _("Windows 2016 RDP protocol is different, If is window 2016, set it"),
-            'domain': _("If your have some network not connect with each other, you can set domain")
-        }
-
-
-class AssetUpdateForm(OrgModelForm):
-    class Meta:
-        model = Asset
-        fields = [
-            'hostname', 'ip', 'protocols', 'nodes',  'is_active', 'platform',
-            'public_ip', 'number', 'comment', 'admin_user', 'labels',
-            'domain',
-        ]
-        widgets = {
-            'nodes': forms.SelectMultiple(attrs={
-                'class': 'select2', 'data-placeholder': _('Node')
-            }),
-            'admin_user': forms.Select(attrs={
-                'class': 'select2', 'data-placeholder': _('Admin user')
-            }),
-            'labels': forms.SelectMultiple(attrs={
-                'class': 'select2', 'data-placeholder': _('Label')
-            }),
-            'domain': forms.Select(attrs={
-                'class': 'select2', 'data-placeholder': _('Domain')
+            'platform': forms.Select(attrs={
+                'class': 'select2', 'data-placeholder': _('Platform')
             }),
         }
         labels = {
@@ -105,7 +111,7 @@ class AssetUpdateForm(OrgModelForm):
 class AssetBulkUpdateForm(OrgModelForm):
     assets = forms.ModelMultipleChoiceField(
         required=True,
-        label=_('Select assets'), queryset=Asset.objects.all(),
+        label=_('Select assets'), queryset=Asset.objects,
         widget=forms.SelectMultiple(
             attrs={
                 'class': 'select2',
@@ -131,10 +137,17 @@ class AssetBulkUpdateForm(OrgModelForm):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self.set_fields_queryset()
+
         # 重写其他字段为不再required
         for name, field in self.fields.items():
             if name != 'assets':
                 field.required = False
+
+    def set_fields_queryset(self):
+        assets_field = self.fields['assets']
+        if hasattr(self, 'data'):
+            assets_field.queryset = Asset.objects.all()
 
     def save(self, commit=True):
         changed_fields = []

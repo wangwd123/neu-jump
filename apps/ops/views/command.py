@@ -6,15 +6,16 @@ from django.conf import settings
 from django.views.generic import ListView, TemplateView
 
 from common.permissions import (
-    PermissionsMixin, IsOrgAdmin, IsAuditor, IsValidUser
+    PermissionsMixin, IsOrgAdmin,  IsValidUser, IsOrgAuditor
 )
 from common.mixins import DatetimeSearchMixin
+from orgs.utils import tmp_to_root_org
 from ..models import CommandExecution
 from ..forms import CommandExecutionForm
 
 
 __all__ = [
-    'CommandExecutionListView', 'CommandExecutionStartView'
+    'CommandExecutionListView', 'CommandExecutionCreateView'
 ]
 
 
@@ -25,7 +26,7 @@ class CommandExecutionListView(PermissionsMixin, DatetimeSearchMixin, ListView):
     ordering = ('-date_created',)
     context_object_name = 'task_list'
     keyword = ''
-    permission_classes = [IsOrgAdmin | IsAuditor]
+    permission_classes = [IsOrgAdmin | IsOrgAuditor]
 
     def _get_queryset(self):
         self.keyword = self.request.GET.get('keyword', '')
@@ -54,7 +55,7 @@ class CommandExecutionListView(PermissionsMixin, DatetimeSearchMixin, ListView):
         return super().get_context_data(**kwargs)
 
 
-class CommandExecutionStartView(PermissionsMixin, TemplateView):
+class CommandExecutionCreateView(PermissionsMixin, TemplateView):
     template_name = 'ops/command_execution_create.html'
     form_class = CommandExecutionForm
     permission_classes = [IsValidUser]
@@ -67,8 +68,9 @@ class CommandExecutionStartView(PermissionsMixin, TemplateView):
     def get_user_system_users(self):
         from perms.utils import AssetPermissionUtil
         user = self.request.user
-        util = AssetPermissionUtil(user)
-        system_users = [s for s in util.get_system_users() if s.protocol == 'ssh']
+        with tmp_to_root_org():
+            util = AssetPermissionUtil(user)
+            system_users = util.get_system_users()
         return system_users
 
     def get_context_data(self, **kwargs):
@@ -77,7 +79,8 @@ class CommandExecutionStartView(PermissionsMixin, TemplateView):
             'app': _('Ops'),
             'action': _('Command execution'),
             'form': self.get_form(),
-            'system_users': system_users
+            'system_users': system_users,
+            'ws_port': settings.WS_LISTEN_PORT
         }
         kwargs.update(context)
         return super().get_context_data(**kwargs)

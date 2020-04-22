@@ -51,6 +51,8 @@ class TreeNode:
             result = True
         elif self.pId != other.pId:
             result = self.pId > other.pId
+        elif str(self.id).startswith('-') and not str(other.id).startswith('-'):
+            result = False
         else:
             result = self.name > other.name
         return result
@@ -96,4 +98,5 @@ class TreeNodeSerializer(serializers.Serializer):
     isParent = serializers.BooleanField(default=False)
     open = serializers.BooleanField(default=False)
     iconSkin = serializers.CharField(max_length=128, allow_blank=True)
+    nocheck = serializers.BooleanField(default=False)
     meta = serializers.JSONField()

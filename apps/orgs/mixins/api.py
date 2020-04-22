@@ -3,14 +3,14 @@
 from django.shortcuts import get_object_or_404
 from rest_framework.viewsets import ModelViewSet
 from rest_framework_bulk import BulkModelViewSet
-from common.mixins import IDInCacheFilterMixin
+from common.mixins import CommonApiMixin
 
-from ..utils import set_to_root_org
+from ..utils import set_to_root_org, filter_org_queryset
 from ..models import Organization
 
 __all__ = [
     'RootOrgViewMixin', 'OrgMembershipModelViewSetMixin', 'OrgModelViewSet',
-    'OrgBulkModelViewSet',
+    'OrgBulkModelViewSet', 'OrgQuerySetMixin',
 ]
 
 
@@ -20,19 +20,41 @@ class RootOrgViewMixin:
         return super().dispatch(request, *args, **kwargs)
 
 
-class OrgModelViewSet(IDInCacheFilterMixin, ModelViewSet):
+class OrgQuerySetMixin:
     def get_queryset(self):
-        return super().get_queryset().all()
+        if hasattr(self, 'model'):
+            queryset = self.model.objects.all()
+        else:
+            assert self.queryset is None, (
+                    "'%s' should not include a `queryset` attribute"
+                    % self.__class__.__name__
+            )
+            queryset = super().get_queryset()
 
-
-class OrgBulkModelViewSet(IDInCacheFilterMixin, BulkModelViewSet):
-    def get_queryset(self):
-        queryset = super().get_queryset().all()
-        if hasattr(self, 'action') and self.action == 'list' and \
-            hasattr(self, 'serializer_class') and \
-                hasattr(self.serializer_class, 'setup_eager_loading'):
-            queryset = self.serializer_class.setup_eager_loading(queryset)
+        if hasattr(self, 'swagger_fake_view'):
+            return queryset[:1]
+        if hasattr(self, 'action') and self.action == 'list':
+            serializer_class = self.get_serializer_class()
+            if serializer_class and hasattr(serializer_class, 'setup_eager_loading'):
+                queryset = serializer_class.setup_eager_loading(queryset)
         return queryset
+
+
+class OrgModelViewSet(CommonApiMixin, OrgQuerySetMixin, ModelViewSet):
+    pass
+
+
+class OrgBulkModelViewSet(CommonApiMixin, OrgQuerySetMixin, BulkModelViewSet):
+    def allow_bulk_destroy(self, qs, filtered):
+        qs_count = qs.count()
+        filtered_count = filtered.count()
+        if filtered_count == 1:
+            return True
+        if qs_count <= filtered_count:
+            return False
+        if self.request.query_params.get('spm', ''):
+            return True
+        return False
 
 
 class OrgMembershipModelViewSetMixin:

@@ -1,6 +1,7 @@
 from django.core.mail import send_mail
 from django.conf import settings
 from celery import shared_task
+
 from .utils import get_logger
 
 
@@ -29,6 +30,6 @@ def send_mail_async(*args, **kwargs):
         args = tuple(args)
 
     try:
-        send_mail(*args, **kwargs)
+        return send_mail(*args, **kwargs)
     except Exception as e:
         logger.error("Sending mail error: {}".format(e))

@@ -5,7 +5,7 @@ import uuid
 from django.db import models
 from django.utils.translation import ugettext_lazy as _
 
-from orgs.mixins import OrgModelMixin
+from orgs.mixins.models import OrgModelMixin
 from common.fields.model import EncryptJsonDictTextField
 
 from .. import const
@@ -21,10 +21,6 @@ class RemoteApp(OrgModelMixin):
     name = models.CharField(max_length=128, verbose_name=_('Name'))
     asset = models.ForeignKey(
         'assets.Asset', on_delete=models.CASCADE, verbose_name=_('Asset')
-    )
-    system_user = models.ForeignKey(
-        'assets.SystemUser', on_delete=models.CASCADE,
-        verbose_name=_('System user')
     )
     type = models.CharField(
         default=const.REMOTE_APP_TYPE_CHROME,
@@ -66,7 +62,7 @@ class RemoteApp(OrgModelMixin):
         _parameters.append(self.type)
         path = '\"%s\"' % self.path
         _parameters.append(path)
-        for field in const.REMOTE_APP_TYPE_MAP_FIELDS[self.type]:
+        for field in const.REMOTE_APP_TYPE_FIELDS_MAP[self.type]:
             value = self.params.get(field['name'])
             if value is None:
                 continue
@@ -79,11 +75,4 @@ class RemoteApp(OrgModelMixin):
         return {
             'id': self.asset.id,
             'hostname': self.asset.hostname
-        }
-
-    @property
-    def system_user_info(self):
-        return {
-            'id': self.system_user.id,
-            'name': self.system_user.name
         }
