@@ -4358,7 +4358,7 @@ msgstr "更新设置成功"
 #: templates/_base_only_msg_content.html:28
 #: xpack/plugins/interface/models.py:36
 msgid "Welcome to the JumpServer open source fortress"
-msgstr "欢迎使用JumpServer开源堡垒机"
+msgstr "东北大学信网办堡垒机"
 
 #: templates/_base_only_msg_content.html:33
 msgid ""
@@ -4366,7 +4366,7 @@ msgid ""
 "source protocol, is a professional operation and maintenance audit system in "
 "compliance with 4A."
 msgstr ""
-"全球首款完全开源的堡垒机，使用GNU GPL v2.0开源协议，是符合 4A 的专业运维审计"
+"基于 Jumpserver 堡垒机，使用GNU GPL v2.0开源协议，是符合 4A 的专业运维审计"
 "系统。"
 
 #: templates/_base_only_msg_content.html:36
